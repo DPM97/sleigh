@@ -33,9 +33,24 @@ pub struct AppendEntriesResponse {
     pub success: bool,
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+pub struct RequestVotePayload {
+    pub term: u64,
+    pub candidate_id: u32,
+    pub last_log_index: usize,
+    pub last_log_term: u64,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct RequestVoteResponse {
+    pub term: u64,
+    pub vote_granted: bool,
+}
+
 #[tarpc::service]
 pub trait Peer {
     async fn append_entries(payload: AppendEntriesPayload) -> AppendEntriesResponse;
+    async fn request_vote(payload: RequestVotePayload) -> RequestVoteResponse;
 }
 
 #[derive(Clone)]
@@ -118,6 +133,61 @@ impl Peer for Receiver {
                 term: state.persistent.term,
                 success: false,
             },
+        }
+    }
+
+    async fn request_vote(
+        self,
+        _: context::Context,
+        payload: RequestVotePayload,
+    ) -> RequestVoteResponse {
+        let state = self.state.lock().await;
+
+        // Reply false if term < currentTerm (§5.1)
+        if payload.term < state.persistent.term {
+            return RequestVoteResponse {
+                term: state.persistent.term,
+                vote_granted: false,
+            };
+        }
+
+        // If votedFor is null or candidateId, and candidate’s log is at
+        // least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
+        if state.persistent.voted_for.is_none()
+            || state.persistent.voted_for.unwrap() == payload.candidate_id
+        {
+            // If the logs have last entries with different terms, then
+            // the log with the later term is more up-to-date.
+            match state.persistent.logs.last() {
+                Some(l) => {
+                    if l.term_recieved_by_leader < payload.last_log_term {
+                        return RequestVoteResponse {
+                            term: state.persistent.term,
+                            vote_granted: true,
+                        };
+                    } else if l.term_recieved_by_leader > payload.last_log_term {
+                        return RequestVoteResponse {
+                            term: state.persistent.term,
+                            vote_granted: false,
+                        };
+                    }
+                }
+                _ => {}
+            };
+
+            // If the logs end with the same term, then whichever log is longer is
+            // more up-to-date.
+            if state.persistent.logs.len() - 1 <= payload.last_log_index {
+                return RequestVoteResponse {
+                    term: state.persistent.term,
+                    vote_granted: true,
+                };
+            }
+        }
+
+        RequestVoteResponse {
+            term: state.persistent.term,
+            vote_granted: false,
         }
     }
 }
