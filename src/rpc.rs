@@ -1,4 +1,4 @@
-use std::{cmp::min, sync::Arc};
+use std::{borrow::BorrowMut, cmp::min, sync::Arc};
 
 use futures::{
     future::{self},
@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     peer::{Log, PeerState},
-    utils::Persist,
+    utils::{time_since_epoch, Persist},
 };
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -56,6 +56,13 @@ pub trait Peer {
 #[derive(Clone)]
 pub struct Receiver {
     state: Arc<Mutex<PeerState>>,
+    timer_last_reset: Arc<Mutex<u128>>,
+}
+
+impl Receiver {
+    async fn reset_timer(&self) {
+        **self.timer_last_reset.lock().await.borrow_mut() = time_since_epoch();
+    }
 }
 
 #[tarpc::server]
@@ -65,7 +72,14 @@ impl Peer for Receiver {
         _: context::Context,
         payload: AppendEntriesPayload,
     ) -> AppendEntriesResponse {
+        self.reset_timer().await;
         let mut state = self.state.lock().await;
+
+        // Leaders send periodic
+        // heartbeats (AppendEntries RPCs that carry no log entries)
+        if payload.entries.len() == 0 {
+            // self.state.ti
+        }
 
         // Reply false if term < currentTerm (§5.1)
         if payload.term < state.persistent.term {
@@ -195,13 +209,23 @@ impl Peer for Receiver {
 pub struct Rpc {}
 
 impl Rpc {
-    pub async fn serve(port: u16, state: Arc<Mutex<PeerState>>) -> anyhow::Result<()> {
+    pub async fn serve(
+        port: u16,
+        state: Arc<Mutex<PeerState>>,
+        timer_last_reset: Arc<Mutex<u128>>,
+    ) -> anyhow::Result<()> {
         tokio::spawn(
             tarpc::serde_transport::tcp::listen(format!("127.0.0.1:{port}"), Json::default)
                 .await?
                 .filter_map(|r| future::ready(r.ok()))
                 .map(BaseChannel::with_defaults)
-                .execute(Receiver { state }.serve()),
+                .execute(
+                    Receiver {
+                        state,
+                        timer_last_reset,
+                    }
+                    .serve(),
+                ),
         );
 
         Ok(())

@@ -1,4 +1,9 @@
+use std::{sync::Arc, time::SystemTime};
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+
+use crate::utils::Timer;
 
 #[derive(Debug, Clone)]
 pub enum PeerType {
@@ -51,10 +56,12 @@ pub struct VolatileState {
 pub struct PeerState {
     pub persistent: PersistentState,
     pub volatile: VolatileState,
+    pub peer_type: PeerType,
+    // pub timer: Timer,
 }
 
-impl Default for PeerState {
-    fn default() -> Self {
+impl PeerState {
+    pub fn new(/*timer_interval: u128, last_heartbeat_recieved: Arc<Mutex<u128>>*/) -> Self {
         Self {
             persistent: PersistentState {
                 term: 0,
@@ -68,6 +75,31 @@ impl Default for PeerState {
                 },
                 leader: None,
             },
+            peer_type: PeerType::Follower,
+            // timer: Timer::new(timer_interval, last_heartbeat_recieved),
         }
+    }
+}
+
+pub struct Runtime {
+    timer: Timer,
+}
+
+impl Runtime {
+    pub fn new(timer_interval: u128, last_heartbeat_recieved: Arc<Mutex<u128>>) -> Self {
+        Self {
+            timer: Timer::new(timer_interval, last_heartbeat_recieved),
+        }
+    }
+
+    pub async fn beat(&mut self, _state: Arc<Mutex<PeerState>>) -> ! {
+        let mut t = SystemTime::now();
+
+        while self.timer.defer().await {
+            println!("deffered {:?}", t.elapsed());
+            t = SystemTime::now();
+        }
+
+        panic!("timer should not have timed out like this :O");
     }
 }
