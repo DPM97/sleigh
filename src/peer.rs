@@ -113,7 +113,7 @@ impl Runtime {
         })
     }
 
-    async fn request_votes(&self, lock: MutexGuard<'_, PeerState>) {
+    async fn self_elect(&self, lock: MutexGuard<'_, PeerState>) -> bool {
         let payload = RequestVotePayload {
             term: lock.persistent.current_term,
             candidate_id: self.peer_id.clone(),
@@ -124,9 +124,11 @@ impl Runtime {
             },
         };
 
-        // probably want to throw this on a thread so it doesn't block the runtime loop
-        let needed_votes = (self.peers.len() / 2) + 1;
-        let mut current_votes = 0;
+        let mut futures_resolved = 0;
+        let peer_ct = self.peers.len() - 1;
+
+        let votes_necessary = (peer_ct / 2) + 1;
+        let mut votes_granted = 0;
 
         self.peers
             .iter()
@@ -148,39 +150,42 @@ impl Runtime {
             })
             .collect::<FuturesUnordered<_>>()
             .take_while(|x| {
-                future::ready(match x {
-                    (peer, Some(vote)) => {
-                        if vote.term == lock.persistent.current_term {
-                            if vote.vote_granted {
-                                current_votes += 1;
-                                println!("{peer} granted vote.");
-                                if current_votes >= needed_votes {
-                                    false
+                future::ready({
+                    let v = match x {
+                        (peer, Some(vote)) => {
+                            if vote.term == lock.persistent.current_term {
+                                if vote.vote_granted {
+                                    votes_granted += 1;
+                                    println!("{peer} granted vote.");
+                                    if votes_granted >= votes_necessary {
+                                        false;
+                                    }
                                 } else {
-                                    true
+                                    println!("{peer} did not grant vote.");
                                 }
                             } else {
-                                println!("{peer} did not grant vote.");
-                                true
+                                if vote.vote_granted {
+                                    println!("{peer} granted vote for another term.");
+                                } else {
+                                    println!("{peer} did not grant vote for another term.");
+                                }
                             }
-                        } else {
-                            if vote.vote_granted {
-                                println!("{peer} granted vote for another term.");
-                                true
-                            } else {
-                                println!("{peer} did not grant vote for another term.");
-                                true
-                            }
+                            true
                         }
-                    }
-                    (peer, None) => {
-                        println!("Didn't recieve vote from {peer}.");
-                        true
-                    }
+                        (peer, None) => {
+                            println!("Didn't recieve vote from {peer}.");
+                            true
+                        }
+                    };
+
+                    futures_resolved += 1;
+                    !v || futures_resolved == peer_ct
                 })
             })
             .collect::<Vec<_>>()
             .await;
+
+        votes_granted >= votes_necessary
     }
 
     pub async fn beat(&mut self) -> ! {
@@ -195,10 +200,12 @@ impl Runtime {
                     // begin election
                     lock.persistent.current_term += 1;
                     lock.persistent.voted_for = Some(self.peer_id.clone());
-                    self.request_votes(lock).await;
                 }
                 PeerType::Candidate => {
-                    println!("hi");
+                    println!("Transitioned to candidate. Attempting to elect self.");
+                    let lock = self.state.lock().await;
+                    let elected = self.self_elect(lock).await;
+                    println!("Elected: {elected}");
                 }
                 PeerType::Leader => todo!(),
             }
