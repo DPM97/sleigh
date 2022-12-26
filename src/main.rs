@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use sleigh::{
-    peer::{PeerState, Runtime},
-    utils::Timer,
-};
+use sleigh::peer::{PeerState, Runtime};
 use tokio::sync::Mutex;
 
 use clap::Parser;
@@ -21,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
 
     // create peer state
     let last_heartbeat_received = Arc::new(Mutex::new(0));
-    let state = Arc::new(Mutex::new(PeerState::new()));
+    let state = Arc::new(Mutex::new(PeerState::default()));
 
     let cur_host = "127.0.0.1:8080".to_string();
     let hosts = vec![
@@ -31,15 +28,7 @@ async fn main() -> anyhow::Result<()> {
     ];
 
     // create runtime loop
-    let mut rt = Runtime::new(
-        Timer::new(5000, last_heartbeat_received.clone()),
-        cur_host,
-        hosts,
-        args.port,
-        last_heartbeat_received,
-        state,
-    )
-    .await?;
+    let mut rt = Runtime::new(cur_host, hosts, args.port, last_heartbeat_received, state).await?;
 
     /*
     spawn(async move {

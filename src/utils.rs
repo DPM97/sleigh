@@ -1,8 +1,10 @@
 use std::{
+    ops::Range,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use rand::{rngs::ThreadRng, Rng};
 use tokio::{sync::Mutex, time::sleep};
 
 use crate::peer::PersistentState;
@@ -24,9 +26,10 @@ impl Persist {
 
 #[derive(Debug, Clone)]
 pub struct Timer {
-    interval: u128,
+    interval_range: Range<u128>,
     last_heartbeat_received: Arc<Mutex<u128>>,
     interval_end: u128,
+    _rng: ThreadRng,
 }
 
 pub fn time_since_epoch() -> u128 {
@@ -37,16 +40,17 @@ pub fn time_since_epoch() -> u128 {
 }
 
 impl Timer {
-    pub fn new(interval: u128, last_heartbeat_received: Arc<Mutex<u128>>) -> Self {
+    pub fn new(interval_range: Range<u128>, last_heartbeat_received: Arc<Mutex<u128>>) -> Self {
         Self {
             last_heartbeat_received,
-            interval,
+            interval_range,
             interval_end: Default::default(),
+            _rng: ThreadRng::default(),
         }
     }
 
     pub async fn defer(&mut self) -> bool {
-        self.interval_end = time_since_epoch() + self.interval;
+        self.interval_end = time_since_epoch() + self._rng.gen_range(self.interval_range.clone());
 
         loop {
             let lhr = *self.last_heartbeat_received.lock().await;
@@ -58,7 +62,7 @@ impl Timer {
             if new == lhr {
                 break;
             }
-            self.interval_end = new + self.interval;
+            self.interval_end = new + self._rng.gen_range(self.interval_range.clone());
         }
 
         true

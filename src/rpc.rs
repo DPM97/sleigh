@@ -1,4 +1,8 @@
-use std::{borrow::BorrowMut, cmp::min, sync::Arc};
+use std::{
+    borrow::BorrowMut,
+    cmp::{min, Ordering},
+    sync::Arc,
+};
 
 use futures::{
     future::{self},
@@ -13,7 +17,7 @@ use tarpc::{
 use tokio::sync::Mutex;
 
 use crate::{
-    peer::{Log, PeerState},
+    peer::{Log, PeerState, PeerType},
     utils::{time_since_epoch, Persist},
 };
 
@@ -75,9 +79,23 @@ impl Peer for Receiver {
         self.reset_timer().await;
         let mut state = self.state.lock().await;
 
+        if matches!(state.peer_type, PeerType::Candidate) {
+            if payload.term >= state.persistent.current_term {
+                state.peer_type = PeerType::Follower;
+                println!("Recieved append_entries from leader with term of valid magnitude. Converting to follower.");
+                // TODO: return here or handle as follower???
+            } else {
+                println!("Recieved append_entries from leader with lower term. Rejecting and continuing to operate as candidate.");
+                return AppendEntriesResponse {
+                    term: state.persistent.current_term,
+                    success: false,
+                };
+            }
+        }
+
         // Leaders send periodic
         // heartbeats (AppendEntries RPCs that carry no log entries)
-        if payload.entries.len() == 0 {
+        if payload.entries.is_empty() {
             self.reset_timer().await;
         }
 
@@ -172,22 +190,23 @@ impl Peer for Receiver {
         {
             // If the logs have last entries with different terms, then
             // the log with the later term is more up-to-date.
-            match state.persistent.logs.last() {
-                Some(l) => {
-                    if l.term_recieved_by_leader < payload.last_log_term {
+            if let Some(l) = state.persistent.logs.last() {
+                match l.term_recieved_by_leader.cmp(&payload.last_log_term) {
+                    Ordering::Less => {
                         return RequestVoteResponse {
                             term: state.persistent.current_term,
                             vote_granted: true,
-                        };
-                    } else if l.term_recieved_by_leader > payload.last_log_term {
+                        }
+                    }
+                    Ordering::Greater => {
                         return RequestVoteResponse {
                             term: state.persistent.current_term,
                             vote_granted: false,
                         };
                     }
+                    _ => {}
                 }
-                _ => {}
-            };
+            }
 
             // If the logs end with the same term, then whichever log is longer is
             // more up-to-date.
