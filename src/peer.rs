@@ -151,7 +151,9 @@ impl Runtime {
             .collect::<FuturesUnordered<_>>()
             .take_while(|x| {
                 future::ready({
-                    let v = match x {
+                    futures_resolved += 1;
+
+                    (match x {
                         (peer, Some(vote)) => {
                             if vote.term == lock.persistent.current_term {
                                 if vote.vote_granted {
@@ -176,10 +178,8 @@ impl Runtime {
                             println!("Didn't recieve vote from {peer}.");
                             true
                         }
-                    };
-
-                    futures_resolved += 1;
-                    !v || futures_resolved == peer_ct
+                    }) == false
+                        || futures_resolved == peer_ct
                 })
             })
             .collect::<Vec<_>>()
