@@ -1,9 +1,18 @@
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
 
+use futures::{
+    future::{self},
+    stream::FuturesUnordered,
+    StreamExt,
+};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tarpc::context;
+use tokio::sync::{Mutex, MutexGuard};
 
-use crate::utils::Timer;
+use crate::{
+    rpc::{RequestVotePayload, Rpc},
+    utils::Timer,
+};
 
 #[derive(Debug, Clone)]
 pub enum PeerType {
@@ -14,9 +23,8 @@ pub enum PeerType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentState {
-    pub term: u64,
-    // u32 ==> peer ID
-    pub voted_for: Option<u32>,
+    pub current_term: u64,
+    pub voted_for: Option<String>,
     // string ==> log
     pub logs: Vec<Log>,
 }
@@ -61,10 +69,10 @@ pub struct PeerState {
 }
 
 impl PeerState {
-    pub fn new(/*timer_interval: u128, last_heartbeat_recieved: Arc<Mutex<u128>>*/) -> Self {
+    pub fn new() -> Self {
         Self {
             persistent: PersistentState {
-                term: 0,
+                current_term: 0,
                 voted_for: None,
                 logs: vec![],
             },
@@ -76,30 +84,124 @@ impl PeerState {
                 leader: None,
             },
             peer_type: PeerType::Follower,
-            // timer: Timer::new(timer_interval, last_heartbeat_recieved),
         }
     }
 }
 
 pub struct Runtime {
+    peer_id: String,
     timer: Timer,
+    peers: Vec<String>,
+    state: Arc<Mutex<PeerState>>,
 }
 
 impl Runtime {
-    pub fn new(timer_interval: u128, last_heartbeat_recieved: Arc<Mutex<u128>>) -> Self {
-        Self {
-            timer: Timer::new(timer_interval, last_heartbeat_recieved),
-        }
+    pub async fn new(
+        timer: Timer,
+        peer_id: String,
+        peers: Vec<String>,
+        port: u16,
+        last_heartbeat_received: Arc<Mutex<u128>>,
+        state: Arc<Mutex<PeerState>>,
+    ) -> anyhow::Result<Self> {
+        Rpc::serve(port, state.clone(), last_heartbeat_received.clone()).await?;
+        Ok(Self {
+            timer,
+            peer_id,
+            peers,
+            state,
+        })
     }
 
-    pub async fn beat(&mut self, _state: Arc<Mutex<PeerState>>) -> ! {
-        let mut t = SystemTime::now();
+    async fn request_votes(&self, lock: MutexGuard<'_, PeerState>) {
+        let payload = RequestVotePayload {
+            term: lock.persistent.current_term,
+            candidate_id: self.peer_id.clone(),
+            last_log_index: lock.persistent.logs.len(),
+            last_log_term: match lock.persistent.logs.last() {
+                Some(l) => l.term_recieved_by_leader,
+                None => 0,
+            },
+        };
 
-        while self.timer.defer().await {
-            println!("deffered {:?}", t.elapsed());
-            t = SystemTime::now();
+        // probably want to throw this on a thread so it doesn't block the runtime loop
+        let needed_votes = (self.peers.len() / 2) + 1;
+        let mut current_votes = 0;
+
+        self.peers
+            .iter()
+            .map(|peer| {
+                let peer = peer.clone();
+                let payload = payload.clone();
+                async move {
+                    // TODO: log errors :)
+                    let r = Rpc::create_client(&peer).await;
+                    if r.is_err() {
+                        return (peer, None);
+                    }
+                    let r = r.unwrap().request_vote(context::current(), payload).await;
+                    if r.is_err() {
+                        return (peer, None);
+                    }
+                    (peer, Some(r.unwrap()))
+                }
+            })
+            .collect::<FuturesUnordered<_>>()
+            .take_while(|x| {
+                future::ready(match x {
+                    (peer, Some(vote)) => {
+                        if vote.term == lock.persistent.current_term {
+                            if vote.vote_granted {
+                                current_votes += 1;
+                                println!("{peer} granted vote.");
+                                if current_votes >= needed_votes {
+                                    false
+                                } else {
+                                    true
+                                }
+                            } else {
+                                println!("{peer} did not grant vote.");
+                                true
+                            }
+                        } else {
+                            if vote.vote_granted {
+                                println!("{peer} granted vote for another term.");
+                                true
+                            } else {
+                                println!("{peer} did not grant vote for another term.");
+                                true
+                            }
+                        }
+                    }
+                    (peer, None) => {
+                        println!("Didn't recieve vote from {peer}.");
+                        true
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+            .await;
+    }
+
+    pub async fn beat(&mut self) -> ! {
+        loop {
+            let peer_type = self.state.lock().await.peer_type.clone();
+            match peer_type {
+                PeerType::Follower => {
+                    self.timer.defer().await;
+                    println!("Follower has failed to recieve a heartbeat from the leader. Converting to candidate.");
+                    let mut lock = self.state.lock().await;
+                    lock.peer_type = PeerType::Candidate;
+                    // begin election
+                    lock.persistent.current_term += 1;
+                    lock.persistent.voted_for = Some(self.peer_id.clone());
+                    self.request_votes(lock).await;
+                }
+                PeerType::Candidate => {
+                    println!("hi");
+                }
+                PeerType::Leader => todo!(),
+            }
         }
-
-        panic!("timer should not have timed out like this :O");
     }
 }

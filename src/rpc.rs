@@ -20,7 +20,7 @@ use crate::{
 #[derive(Deserialize, Serialize, Debug)]
 pub struct AppendEntriesPayload {
     pub term: u64,
-    pub leader_id: u32,
+    pub leader_id: Option<String>,
     pub prev_log_index: usize,
     pub prev_log_term: u64,
     pub entries: Vec<Log>,
@@ -33,10 +33,10 @@ pub struct AppendEntriesResponse {
     pub success: bool,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct RequestVotePayload {
     pub term: u64,
-    pub candidate_id: u32,
+    pub candidate_id: String,
     pub last_log_index: usize,
     pub last_log_term: u64,
 }
@@ -78,13 +78,13 @@ impl Peer for Receiver {
         // Leaders send periodic
         // heartbeats (AppendEntries RPCs that carry no log entries)
         if payload.entries.len() == 0 {
-            // self.state.ti
+            self.reset_timer().await;
         }
 
         // Reply false if term < currentTerm (§5.1)
-        if payload.term < state.persistent.term {
+        if payload.term < state.persistent.current_term {
             return AppendEntriesResponse {
-                term: state.persistent.term,
+                term: state.persistent.current_term,
                 success: false,
             };
         }
@@ -95,14 +95,14 @@ impl Peer for Receiver {
             Some(l) => {
                 if l.term_recieved_by_leader != payload.prev_log_term {
                     return AppendEntriesResponse {
-                        term: state.persistent.term,
+                        term: state.persistent.current_term,
                         success: false,
                     };
                 }
             }
             None => {
                 return AppendEntriesResponse {
-                    term: state.persistent.term,
+                    term: state.persistent.current_term,
                     success: false,
                 }
             }
@@ -134,17 +134,17 @@ impl Peer for Receiver {
         // min(leaderCommit, index of last new entry)
         if payload.leader_commit > state.volatile.peer.commit_index {
             state.volatile.peer.commit_index =
-                min(payload.leader_commit, state.persistent.logs.len() - 1);
+                min(payload.leader_commit, state.persistent.logs.len());
         }
 
         // TODO panic if failed write?
         match Persist::write(&state.persistent).await {
             Ok(_) => AppendEntriesResponse {
-                term: state.persistent.term,
+                term: state.persistent.current_term,
                 success: true,
             },
             Err(_) => AppendEntriesResponse {
-                term: state.persistent.term,
+                term: state.persistent.current_term,
                 success: false,
             },
         }
@@ -158,9 +158,9 @@ impl Peer for Receiver {
         let state = self.state.lock().await;
 
         // Reply false if term < currentTerm (§5.1)
-        if payload.term < state.persistent.term {
+        if payload.term < state.persistent.current_term {
             return RequestVoteResponse {
-                term: state.persistent.term,
+                term: state.persistent.current_term,
                 vote_granted: false,
             };
         }
@@ -168,7 +168,7 @@ impl Peer for Receiver {
         // If votedFor is null or candidateId, and candidate’s log is at
         // least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
         if state.persistent.voted_for.is_none()
-            || state.persistent.voted_for.unwrap() == payload.candidate_id
+            || state.persistent.voted_for.as_ref().unwrap() == &payload.candidate_id
         {
             // If the logs have last entries with different terms, then
             // the log with the later term is more up-to-date.
@@ -176,12 +176,12 @@ impl Peer for Receiver {
                 Some(l) => {
                     if l.term_recieved_by_leader < payload.last_log_term {
                         return RequestVoteResponse {
-                            term: state.persistent.term,
+                            term: state.persistent.current_term,
                             vote_granted: true,
                         };
                     } else if l.term_recieved_by_leader > payload.last_log_term {
                         return RequestVoteResponse {
-                            term: state.persistent.term,
+                            term: state.persistent.current_term,
                             vote_granted: false,
                         };
                     }
@@ -191,16 +191,16 @@ impl Peer for Receiver {
 
             // If the logs end with the same term, then whichever log is longer is
             // more up-to-date.
-            if state.persistent.logs.len() - 1 <= payload.last_log_index {
+            if state.persistent.logs.len() <= payload.last_log_index {
                 return RequestVoteResponse {
-                    term: state.persistent.term,
+                    term: state.persistent.current_term,
                     vote_granted: true,
                 };
             }
         }
 
         RequestVoteResponse {
-            term: state.persistent.term,
+            term: state.persistent.current_term,
             vote_granted: false,
         }
     }
@@ -231,10 +231,10 @@ impl Rpc {
         Ok(())
     }
 
-    pub async fn create_client() -> anyhow::Result<PeerClient> {
+    pub async fn create_client(host_addr: &str) -> anyhow::Result<PeerClient> {
         let client = PeerClient::new(
             client::Config::default(),
-            tarpc::serde_transport::tcp::connect("127.0.0.1:8080", Json::default).await?,
+            tarpc::serde_transport::tcp::connect(host_addr, Json::default).await?,
         )
         .spawn();
 

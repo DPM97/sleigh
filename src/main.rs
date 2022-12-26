@@ -1,38 +1,47 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use rand::{rngs::StdRng, Rng, SeedableRng};
 use sleigh::{
     peer::{PeerState, Runtime},
-    rpc::{AppendEntriesPayload, Rpc},
-    utils::time_since_epoch,
+    utils::Timer,
 };
-use tarpc::context;
-use tokio::{spawn, sync::Mutex, time::sleep};
+use tokio::sync::Mutex;
+
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    port: u16,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    // create peer state
     let last_heartbeat_received = Arc::new(Mutex::new(0));
     let state = Arc::new(Mutex::new(PeerState::new()));
 
-    Rpc::serve(8080, state.clone(), last_heartbeat_received.clone()).await?;
-    let client = Rpc::create_client().await?;
+    let cur_host = "127.0.0.1:8080".to_string();
+    let hosts = vec![
+        cur_host.clone(),
+        "127.0.0.1:8081".to_string(),
+        "127.0.0.1:8082".to_string(),
+    ];
 
-    let _todo = client
-        .append_entries(
-            context::current(),
-            AppendEntriesPayload {
-                term: 0,
-                leader_id: 0,
-                prev_log_index: 0,
-                prev_log_term: 0,
-                entries: vec![],
-                leader_commit: 0,
-            },
-        )
-        .await?;
+    // create runtime loop
+    let mut rt = Runtime::new(
+        Timer::new(5000, last_heartbeat_received.clone()),
+        cur_host,
+        hosts,
+        args.port,
+        last_heartbeat_received,
+        state,
+    )
+    .await?;
 
-    let mut rt = Runtime::new(5000, last_heartbeat_received.clone());
-
+    /*
     spawn(async move {
         loop {
             let mut rng: StdRng = SeedableRng::from_entropy();
@@ -42,8 +51,9 @@ async fn main() -> anyhow::Result<()> {
             println!("slept {d}ms");
         }
     });
+    */
 
-    rt.beat(state).await;
+    rt.beat().await;
 
     Ok(())
 }
