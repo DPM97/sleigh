@@ -1,4 +1,4 @@
-use std::{ops::Range, sync::Arc, task::Poll, time::Duration};
+use std::{ops::Range, sync::Arc, time::Duration};
 
 use futures::{
     future::{self},
