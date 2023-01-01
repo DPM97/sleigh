@@ -1,17 +1,18 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc, task::Poll, time::Duration};
 
 use futures::{
     future::{self},
     stream::FuturesUnordered,
     StreamExt,
 };
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tarpc::context;
-use tokio::{select, sync::Mutex};
+use tokio::{select, sync::Mutex, time::sleep};
 
 use crate::{
-    rpc::{RequestVotePayload, Rpc},
-    utils::Timer,
+    rpc::{AppendEntriesPayload, RequestVotePayload, Rpc},
+    utils::{Persist, Timer},
 };
 
 #[derive(Debug, Clone)]
@@ -111,6 +112,55 @@ impl Runtime {
         })
     }
 
+    async fn send_heartbeats(&mut self) {
+        println!("Sending heartbeats to peers!");
+
+        let payload = {
+            let lock = self.state.lock().await;
+            AppendEntriesPayload {
+                term: lock.persistent.current_term,
+                leader_id: Some(self.peer_id.clone()),
+                prev_log_index: lock.persistent.logs.len(),
+                prev_log_term: match lock.persistent.logs.last() {
+                    None => 0,
+                    Some(l) => l.term_recieved_by_leader,
+                },
+                entries: vec![],
+                leader_commit: lock.volatile.peer.commit_index,
+            }
+        };
+
+        self.peers
+            .iter()
+            .map(|peer| {
+                let peer = peer.clone();
+                let payload = payload.clone();
+                async move {
+                    // TODO: log errors :)
+                    loop {
+                        let r = Rpc::create_client(&peer).await;
+                        if r.is_err() {
+                            continue;
+                        }
+                        if r.unwrap()
+                            .append_entries(context::current(), payload.clone())
+                            .await
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            })
+            .collect::<FuturesUnordered<_>>()
+            .take((self.peers.len() - 1) / 2)
+            .collect::<Vec<_>>()
+            .await;
+
+        println!("Adequate amount of hearbeat responses recieved!");
+    }
+
     async fn self_elect(&mut self) -> bool {
         let payload = {
             let lock = self.state.lock().await;
@@ -190,8 +240,8 @@ impl Runtime {
         votes_granted >= votes_necessary
     }
 
-    fn create_timer(&self) -> Timer {
-        Timer::new(150..300, self.last_heartbeat_received.clone())
+    fn create_timer(&self, range: Range<u128>) -> Timer {
+        Timer::new(range, self.last_heartbeat_received.clone())
     }
 
     pub async fn beat(&mut self) -> ! {
@@ -202,7 +252,7 @@ impl Runtime {
                     // begin election timer (i.e., if this resolves, we should
                     // convert to candidate as there hasn't been leader
                     // communication in a while)
-                    self.create_timer().defer().await;
+                    self.create_timer(150..300).defer().await;
                     println!("Follower has failed to recieve a heartbeat from the leader. Converting to candidate.");
                     self.state.lock().await.peer_type = PeerType::Candidate;
                 }
@@ -212,9 +262,12 @@ impl Runtime {
                         let mut lock = self.state.lock().await;
                         lock.persistent.current_term += 1;
                         lock.persistent.voted_for = Some(self.peer_id.clone());
+                        Persist::write(&lock.persistent)
+                            .await
+                            .expect("failed to write persistent state");
                     }
 
-                    let mut election_timer = self.create_timer();
+                    let mut election_timer = self.create_timer(150..300);
                     let elected = select! {
                         _ = election_timer.defer() => {
                             println!("Election timed out.");
@@ -231,7 +284,14 @@ impl Runtime {
                         lock.peer_type = PeerType::Leader;
                     }
                 }
-                PeerType::Leader => todo!(),
+                // leaders service peer requests through the rpc server
+                // and will send heartbeats here
+                PeerType::Leader => {
+                    sleep(Duration::from_millis(
+                        rand::thread_rng().gen_range(150..300),
+                    ))
+                    .await;
+                }
             }
         }
     }

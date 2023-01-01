@@ -21,7 +21,7 @@ use crate::{
     utils::{time_since_epoch, Persist},
 };
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct AppendEntriesPayload {
     pub term: u64,
     pub leader_id: Option<String>,
