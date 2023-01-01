@@ -291,6 +291,7 @@ impl Runtime {
                         rand::thread_rng().gen_range(150..300),
                     ))
                     .await;
+                    self.send_heartbeats().await;
                 }
             }
         }
